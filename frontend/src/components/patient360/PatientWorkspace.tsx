@@ -2,7 +2,7 @@ import { useState } from "react"
 import { patientPageUrl } from "../patientRecord/patientRecord"
 import { p360, type Row } from "./api"
 import TasksView from "./TasksView"
-import { Badge, btnCls, Card, Empty, ErrorBox, errMsg, Field, fmtDate, fmtDateTime, fullName, inputCls, Loading, pretty, Table, Tabs, useAsync } from "./ui"
+import { Badge, btnCls, Card, Empty, ErrorBox, errMsg, Field, fmtDate, fmtDateTime, fullName, inputCls, Loading, pretty, Table, Tabs, useAsync, firstSymptoms } from "./ui"
 
 type Tab = "overview" | "timeline" | "clinical" | "encounters" | "medications" | "investigations" | "journey" | "surveys" | "communications" | "tasks" | "consent"
 
@@ -103,6 +103,8 @@ export default function PatientWorkspace({ patientId, onBack, navigate }: { pati
 
 function OverviewTab({ d }: { d: Row }) {
   const upcoming = d.appointments.filter((a: Row) => ["scheduled", "checked_in"].includes(a.status)).slice(0, 4)
+  const nextAppt = (d.further_appointments && d.further_appointments[0]) || upcoming[0] || d.appointments[0]
+  const whatsappSymptomText = firstSymptoms(d.whatsapp_symptoms?.symptoms, d.patient?.symptoms, d.encounters?.[0]?.symptoms, d.encounters?.[0]?.chief_complaint)
   const nextCp = d.checkpoints.find((c: Row) => ["scheduled", "queued", "overdue"].includes(c.status))
   return (
     <div className="grid gap-3 md:grid-cols-2">
@@ -110,7 +112,27 @@ function OverviewTab({ d }: { d: Row }) {
         {d.admissions[0] ? (
           <p className="text-[12px]">Admitted {fmtDate(d.admissions[0].admission_date)} · {d.admissions[0].discharge_date ? `discharged ${fmtDate(d.admissions[0].discharge_date)}` : <Badge tone="blue">Currently admitted</Badge>}<Source r={d.admissions[0]} /></p>
         ) : d.encounters[0] ? (
-          <p className="text-[12px]">{d.encounters[0].encounter_type} visit {fmtDateTime(d.encounters[0].arrival_at)} · {d.encounters[0].chief_complaint || "no complaint recorded"}<Source r={d.encounters[0]} /></p>
+          <div className="space-y-2 text-[12px]">
+            <p className="flex items-center gap-2 flex-wrap">
+              <span>{d.encounters[0].encounter_type} visit {fmtDateTime(d.encounters[0].arrival_at)} · {d.encounters[0].chief_complaint || "no complaint recorded"}</span>
+              <Badge status={d.encounters[0].status} />
+              <Source r={d.encounters[0]} />
+            </p>
+            <div className="rounded border border-[#DCE6FB] bg-[#F4F7FE] p-1.5 text-[11px]">
+              <span className="font-semibold text-gray-800">📅 Further Appointment: </span>
+              {nextAppt ? (
+                <span className="font-medium text-[#1B4FD8]">
+                  {fmtDateTime(nextAppt.appointment_date)} · {nextAppt.doctor_name || "Doctor"} ({nextAppt.department || "General"})
+                </span>
+              ) : <span className="text-[#64748B]">None scheduled</span>}
+            </div>
+            <div className="rounded border border-emerald-200 bg-emerald-50/70 p-1.5 text-[11px]">
+              <span className="font-semibold text-emerald-900">Symptoms: </span>
+              <span className="font-medium text-gray-900 italic">
+                {whatsappSymptomText ? `"${whatsappSymptomText}"` : "None reported"}
+              </span>
+            </div>
+          </div>
         ) : <p className="text-[12px] text-[#64748B]">No encounters recorded.</p>}
       </Card>
       <Card title="Diagnoses on record">
@@ -178,21 +200,61 @@ export function ClinicalTab({ d }: { d: Row }) {
       <Card title="Diagnosis history">
         {d.diagnoses.length ? <Table head={["Diagnosis", "Recorded", "Source"]}>{d.diagnoses.map((x: Row) => <tr key={x.id}><td className="px-2 py-1.5">{x.diagnosis_name}</td><td className="px-2 py-1.5">{fmtDate(x.created_at)}</td><td className="px-2 py-1.5 text-[10.5px] text-[#94A3B8]">{x.source_module} · {pretty(x.verification_state)}</td></tr>)}</Table> : <p className="text-[12px] text-[#64748B]">None recorded.</p>}
       </Card>
-      <Card title="Vitals history" className="md:col-span-2">
-        {d.vitals.length ? <Table head={["When", "BP", "Pulse", "Temperature"]}>{d.vitals.map((v: Row) => <tr key={v.id}><td className="px-2 py-1.5">{fmtDateTime(v.created_at)}</td><td className="px-2 py-1.5">{v.bp || "—"}</td><td className="px-2 py-1.5">{v.pulse || "—"}</td><td className="px-2 py-1.5">{v.temperature || "—"}</td></tr>)}</Table> : <p className="text-[12px] text-[#64748B]">None recorded.</p>}
-      </Card>
+      <p className="text-[11px] text-[#94A3B8] md:col-span-2">Vitals history and trends are on the Vitals tab.</p>
     </div>
   )
 }
 
 export function EncountersTab({ d }: { d: Row }) {
+  const nextAppt = (d.further_appointments && d.further_appointments[0]) || d.appointments?.filter((a: Row) => ["scheduled", "checked_in", "confirmed", "booked", "pending"].includes(a.status))[0] || d.appointments?.[0]
+  const whatsappSymptomText = firstSymptoms(d.whatsapp_symptoms?.symptoms, d.patient?.symptoms, d.encounters?.[0]?.symptoms, d.encounters?.[0]?.chief_complaint)
+
   return (
     <div className="space-y-3">
       <Card title="Admissions">
         {d.admissions.length ? <Table head={["Admitted", "Discharged", "Source"]}>{d.admissions.map((a: Row) => <tr key={a.id}><td className="px-2 py-1.5">{fmtDateTime(a.admission_date)}</td><td className="px-2 py-1.5">{a.discharge_date ? fmtDate(a.discharge_date) : <Badge tone="blue">Admitted</Badge>}</td><td className="px-2 py-1.5 text-[10.5px] text-[#94A3B8]">{a.source_module}</td></tr>)}</Table> : <p className="text-[12px] text-[#64748B]">None.</p>}
       </Card>
       <Card title="OP / IP encounters">
-        {d.encounters.length ? <Table head={["Arrived", "Type", "Complaint", "Status"]}>{d.encounters.map((e: Row) => <tr key={e.id}><td className="px-2 py-1.5">{fmtDateTime(e.arrival_at)}</td><td className="px-2 py-1.5">{e.encounter_type}</td><td className="px-2 py-1.5">{e.chief_complaint || "—"}</td><td className="px-2 py-1.5"><Badge status={e.status} /></td></tr>)}</Table> : <p className="text-[12px] text-[#64748B]">None.</p>}
+        {d.encounters.length ? (
+          <Table head={["Arrived", "Type", "Complaint", "Status", "Further Appointment", "Symptoms"]}>
+            {d.encounters.map((e: Row) => (
+              <tr key={e.id}>
+                <td className="px-2 py-1.5">{fmtDateTime(e.arrival_at)}</td>
+                <td className="px-2 py-1.5">{e.encounter_type}</td>
+                <td className="px-2 py-1.5">{e.chief_complaint || "—"}</td>
+                <td className="px-2 py-1.5 whitespace-nowrap">
+                  <Badge status={e.status} />
+                </td>
+                <td className="px-2 py-1.5 text-[11px]">
+                  {nextAppt ? (
+                    <div>
+                      <div className="font-semibold text-gray-900">{fmtDateTime(nextAppt.appointment_date)}</div>
+                      <div className="text-[10px] text-[#64748B]">{nextAppt.doctor_name || "Doctor"} · {nextAppt.department || "General"}</div>
+                    </div>
+                  ) : (
+                    <span className="text-[#94A3B8]">—</span>
+                  )}
+                </td>
+                <td className="px-2 py-1.5 text-[11px]">
+                  {whatsappSymptomText ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-flex items-center gap-0.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800 border border-emerald-200 shrink-0">
+                        Symptoms
+                      </span>
+                      <span className="font-medium text-gray-900 italic max-w-xs truncate" title={whatsappSymptomText}>
+                        {whatsappSymptomText}
+                      </span>
+                    </div>
+                  ) : e.symptoms ? (
+                    <span className="text-gray-800">{e.symptoms}</span>
+                  ) : (
+                    <span className="text-[#94A3B8]">—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </Table>
+        ) : <p className="text-[12px] text-[#64748B]">None.</p>}
       </Card>
       <Card title="Appointments (read from the scheduler)">
         {d.appointments.length ? <Table head={["When", "Department", "Doctor", "Type", "Status"]}>{d.appointments.map((a: Row) => <tr key={a.id}><td className="px-2 py-1.5">{fmtDateTime(a.appointment_date)}</td><td className="px-2 py-1.5">{a.department || "—"}</td><td className="px-2 py-1.5">{a.doctor_name || "—"}</td><td className="px-2 py-1.5">{a.visit_type}</td><td className="px-2 py-1.5"><Badge status={a.status} /></td></tr>)}</Table> : <p className="text-[12px] text-[#64748B]">None.</p>}

@@ -520,4 +520,5 @@ async function step(name: string, fn: () => unknown) {
   const out = results.join("\n")
   console.log(out)
   console.log("STATUS NOW:", E.getClaimById(id)?.status)
-})().catch((e) => { console.log(results.join("\n")); console.log("HARNESS ERROR", e) })
+  process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0)
+})().catch((e) => { console.log(results.join("\n")); console.log("HARNESS ERROR", e); process.exit(1) })

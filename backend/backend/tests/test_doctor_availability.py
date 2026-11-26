@@ -67,8 +67,11 @@ class TestDoctorEligibilityRules(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with get_connection(autocommit=True) as conn:
-            ensure_doctor_availability_tables(conn)
+        try:
+            with get_connection(autocommit=True) as conn:
+                ensure_doctor_availability_tables(conn)
+        except Exception as exc:
+            raise unittest.SkipTest(f"needs a reachable PostgreSQL (DATABASE_URL): {exc}")
 
     def setUp(self):
         """Creates an isolated test doctor with user account and active schedule."""

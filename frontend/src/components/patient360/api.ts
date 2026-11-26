@@ -29,6 +29,10 @@ export const p360 = {
   profile: (id: string) => get(`/patients/${encodeURIComponent(id)}`),
   timeline: (id: string, p: { category?: string; limit?: number; offset?: number }) => get(`/patients/${encodeURIComponent(id)}/timeline`, p),
   patientAudit: (id: string) => get(`/patients/${encodeURIComponent(id)}/audit`),
+  notes: (id: string) => get(`/patients/${encodeURIComponent(id)}/notes`),
+  addNote: (id: string, note: string) => send("POST", `/patients/${encodeURIComponent(id)}/notes`, { note }),
+  fullRecord: (id: string) => get(`/patients/${encodeURIComponent(id)}/full-record`),
+  symptomHistory: (id: string) => get(`/patients/${encodeURIComponent(id)}/symptoms`),
 
   consent: (id: string) => get(`/patients/${encodeURIComponent(id)}/consent`),
   recordConsent: (id: string, b: Row) => send("POST", `/patients/${encodeURIComponent(id)}/consent`, b),

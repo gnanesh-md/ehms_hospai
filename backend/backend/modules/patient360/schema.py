@@ -262,6 +262,18 @@ PATIENT360_DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_p360_seg_members ON segment_memberships (segment_id, patient_id)",
+    # ── Coordinator notes: internal, append-only free text about a patient (separate from tasks) ─────────
+    """
+    CREATE TABLE IF NOT EXISTS care_notes (
+        id SERIAL PRIMARY KEY,
+        hospital_id INTEGER NOT NULL,
+        patient_id TEXT NOT NULL,
+        note TEXT NOT NULL,
+        author TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_p360_notes_patient ON care_notes (hospital_id, patient_id, created_at)",
 ]
 
 

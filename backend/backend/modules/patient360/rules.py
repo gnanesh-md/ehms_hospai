@@ -17,6 +17,21 @@ from datetime import datetime, timedelta, timezone
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+_HOSPITAL_TEMPLATE = re.compile(r"you are registered at|\bUMR\b.{0,60}\bOP No\b|OP timings\s*:", re.I | re.S)
+_BOILERPLATE = re.compile(r"\bHelpline\b[^.\n]*\.?|Your health record\s*:?\s*\S*|https?://\S+", re.I)
+
+
+def clean_symptom_text(text):
+    """Symptoms must be what the patient reported. Returns None when `text` is really the hospital's own registration
+    message (it can be echoed back through WhatsApp), and strips helpline / health-record-link boilerplate otherwise."""
+    if not text or not str(text).strip():
+        return None
+    s = str(text)
+    if _HOSPITAL_TEMPLATE.search(s):
+        return None
+    s = re.sub(r"\s{2,}", " ", _BOILERPLATE.sub("", s)).strip(" .,-\n")
+    return s or None
+
 # ── Enums (spec Appendix A) ─────────────────────────────────────────────────────────────────────
 CHANNELS = ("whatsapp", "sms")
 # "all" is only ever *recorded* (a STOP reply / a blanket withdrawal); it is not a purpose you send for.

@@ -166,6 +166,10 @@ def handle_incoming_message(phone, text, reply=None):
             logging.getLogger(__name__).exception("Failed to record WhatsApp opt-out")
         return
     rating, comment = parse_rating_and_comment(text)
+    # An echoed copy of the hospital's own registration message is not a symptom report.
+    from modules.patient360.rules import clean_symptom_text
+    if comment and clean_symptom_text(comment) is None:
+        comment = ""
 
     # Matched on the last 10 digits: the feedback window is opened with
     # whatever the patient record holds ("9876543210"), while the reply comes
@@ -201,11 +205,14 @@ def handle_incoming_message(phone, text, reply=None):
         # Create an orphan feedback or link it dynamically if missing init_feedback
         with get_connection() as conn:
             patient = conn.execute(
-                "SELECT id FROM patients WHERE phone = ? OR phone LIKE ? ORDER BY id DESC LIMIT 1",
+                "SELECT id, patient_id, hospital_id, name FROM patients WHERE phone = ? OR phone LIKE ? ORDER BY id DESC LIMIT 1",
                 (phone, f"%{phone[-10:]}"),
             ).fetchone()
 
         patient_id = patient["id"] if patient else None
+        canonical_pid = patient["patient_id"] if patient else None
+        hospital_id = patient["hospital_id"] if patient and patient.get("hospital_id") else 1
+        patient_name = patient["name"] if patient and patient.get("name") else ""
 
         with get_connection(autocommit=True) as conn:
             conn.execute(
@@ -215,6 +222,17 @@ def handle_incoming_message(phone, text, reply=None):
             """,
                 (patient_id, phone, rating, comment if comment else None, status),
             )
+            if comment and patient_id:
+                try:
+                    conn.execute("UPDATE patients SET symptoms = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (comment, patient_id))
+                    if canonical_pid:
+                        conn.execute("UPDATE encounters SET symptoms = ? WHERE patient_id = ? AND status IN ('Registered', 'In Queue', 'Awaiting Triage', 'active')", (comment, canonical_pid))
+                        conn.execute("""
+                            INSERT INTO patient_messages (hospital_id, patient_id, patient_name, phone, channel, kind, body, status, created_by)
+                            VALUES (?, ?, ?, ?, 'whatsapp', 'symptoms', ?, 'received', 'patient_whatsapp')
+                        """, (hospital_id, canonical_pid, patient_name, phone, comment))
+                except Exception as ex:
+                    print("Error updating patient symptoms from WhatsApp:", ex)
         return
 
     with get_connection(autocommit=True) as conn:
@@ -226,6 +244,11 @@ def handle_incoming_message(phone, text, reply=None):
         """,
             (rating, comment if comment else None, status, feedback["id"]),
         )
+        if comment and feedback.get("patient_id"):
+            try:
+                conn.execute("UPDATE patients SET symptoms = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (comment, feedback["patient_id"]))
+            except Exception:
+                pass
 
 
 def parse_rating_and_comment(text):

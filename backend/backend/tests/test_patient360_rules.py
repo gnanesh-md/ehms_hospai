@@ -213,3 +213,22 @@ def test_match_reasons_explain_each_condition():
     assert not r.condition_holds("age", "gte", None, 50)
     assert "Age >= 50 (patient: 54)" == r.describe_condition(conds[0], 54)
     assert r.describe_condition(conds[1], 1).startswith("Has a phone number is yes")
+
+
+# ── Symptom text must be what the patient reported ──────────────────────────────────────────────
+REGISTRATION_ECHO = ("Dear A B, you are registered at Imperial Hospitals. UMR PAT-1, OP No. OP034, Department. OP timings: Mon-Sat, 9:00 AM - 5:00 PM. "
+                     "Please wait to be called. Helpline 08816-279999. Your health record: http://192.168.1.235:8443/#/card/abc")
+
+
+def test_registration_message_is_not_a_symptom():
+    assert r.clean_symptom_text(REGISTRATION_ECHO) is None
+
+
+def test_boilerplate_is_stripped_from_real_symptoms():
+    assert r.clean_symptom_text("fever and cough since 2 days. Helpline 08816-279999. Your health record: http://x/y") == "fever and cough since 2 days"
+    assert r.clean_symptom_text("chest pain") == "chest pain"
+
+
+@pytest.mark.parametrize("empty", [None, "", "   "])
+def test_empty_symptoms_are_none(empty):
+    assert r.clean_symptom_text(empty) is None

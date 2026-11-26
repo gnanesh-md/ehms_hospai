@@ -19,13 +19,16 @@ def _defined_blueprints():
 
 
 def test_every_blueprint_is_registered():
-    app_src = (ROOT / "app.py").read_text(encoding="utf-8")
+    app_sources = [
+        (ROOT / "app.py").read_text(encoding="utf-8"),
+        *(p.read_text(encoding="utf-8") for p in (ROOT / "services").glob("*/app.py")),
+    ]
     missing = [
         f"{module}.{var}"
         for var, module in _defined_blueprints().items()
-        if not re.search(rf"register_blueprint\(\s*{var}\b", app_src)
+        if not any(re.search(rf"register_blueprint\(\s*{var}\b", src) for src in app_sources)
     ]
-    assert not missing, f"Blueprints defined but never registered in app.py: {missing}"
+    assert not missing, f"Blueprints defined but never registered in app.py or services/*/app.py: {missing}"
 
 
 def test_blueprint_variables_are_uniquely_named():

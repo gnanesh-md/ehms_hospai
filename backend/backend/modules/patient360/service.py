@@ -94,7 +94,7 @@ def _vitals(cur, pid):
     when = "recorded_at" if _has_col(cur, "patient_vitals", "recorded_at") else "created_at"
     extra = [c for c in ("spo2", "respiratory_rate", "blood_glucose", "weight", "height") if _has_col(cur, "patient_vitals", c)]
     cols = ", ".join(["id", "bp", "pulse", "temperature"] + extra)
-    return _all(cur, f"SELECT {cols}, {when} AS created_at FROM patient_vitals WHERE patient_id = ? ORDER BY {when} DESC LIMIT 5", (pid,))
+    return _all(cur, f"SELECT {cols}, {when} AS created_at FROM patient_vitals WHERE patient_id = ? ORDER BY {when} DESC LIMIT 30", (pid,))
 
 
 # ── Registry ────────────────────────────────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ def list_registry(hospital_id, q="", state="", limit=25, offset=0):
 # ── Profile ─────────────────────────────────────────────────────────────────────────────────────
 _PROFILE_FIELDS = (
     "patient_id, name, middle_name, last_name, dob, age, gender, phone, address, blood_group, "
-    "emergency_contact, allergies, patient_type, created_at, updated_at"
+    "emergency_contact, allergies, symptoms, patient_type, created_at, updated_at"
 )  # no Aadhaar / identity hash: those never leave the patient module
 
 
@@ -202,10 +202,36 @@ def get_profile(hospital_id, patient_id):
                      (hospital_id, pid))
         responses = _all(cur, "SELECT id, survey_key, survey_version, review_status, submitted_at, channel FROM survey_responses "
                               "WHERE hospital_id = ? AND patient_id = ? ORDER BY submitted_at DESC LIMIT 10", (hospital_id, pid))
-        messages = _all(cur, "SELECT id, channel, kind, status, created_at FROM patient_messages WHERE hospital_id = ? AND patient_id = ? "
+        messages = _all(cur, "SELECT id, channel, kind, body, status, created_at FROM patient_messages WHERE hospital_id = ? AND patient_id = ? "
                              "ORDER BY created_at DESC LIMIT 15", (hospital_id, pid))
         prefs = _one(cur, "SELECT preferred_language, preferred_channel, contact_from_hour, contact_to_hour, updated_by, updated_at "
                           "FROM patient360_preferences WHERE hospital_id = ? AND patient_id = ?", (hospital_id, pid))
+        phone_digits = "".join(ch for ch in (patient.get("phone") or "") if ch.isdigit())
+        whatsapp_fb = None
+        if phone_digits:
+            whatsapp_fb = _one(
+                cur,
+                """
+                SELECT comment, received_at, whatsapp_message_id, rating
+                FROM patient_feedback
+                WHERE RIGHT(regexp_replace(phone_number, '[^0-9]', '', 'g'), 10) = ?
+                  AND comment IS NOT NULL AND comment <> ''
+                ORDER BY received_at DESC LIMIT 1
+                """,
+                (phone_digits[-10:],),
+            )
+        whatsapp_msg = _one(
+            cur,
+            """
+            SELECT body, created_at, kind
+            FROM patient_messages
+            WHERE hospital_id = ? AND patient_id = ? AND channel = 'whatsapp'
+              AND kind = 'symptoms'  -- only what the patient reported, never the hospital's own outbound messages
+              AND body IS NOT NULL AND body <> ''
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (hospital_id, pid),
+        )
     medications = []
     for rx in rx_rows:
         items = _j(rx.pop("medicines_json", None), [])
@@ -237,6 +263,39 @@ def get_profile(hospital_id, patient_id):
         r.update(_source("outpatient" if r.get("encounter_type") == "OP" else "inpatient", "encounter", r.get("id")))
     for r in appointments:
         r.update(_source("appointments", "appointment", r.get("id")))
+
+    # Never show the hospital's own registration message (or its helpline / link boilerplate) as the patient's symptoms.
+    clean = rules.clean_symptom_text
+    patient["symptoms"] = clean(patient.get("symptoms"))
+    for e in encounters:
+        e["symptoms"] = clean(e.get("symptoms"))
+    whatsapp_symptom_text = (
+        clean(whatsapp_msg.get("body") if whatsapp_msg else None)
+        or patient.get("symptoms")
+        or (encounters[0].get("symptoms") if encounters else None)
+        or clean(whatsapp_fb.get("comment") if whatsapp_fb else None)
+    )
+    whatsapp_symptom_at = (
+        (whatsapp_msg.get("created_at") if whatsapp_msg else None)
+        or (whatsapp_fb.get("received_at") if whatsapp_fb else None)
+        or patient.get("updated_at")
+    )
+    whatsapp_symptoms = {
+        "symptoms": whatsapp_symptom_text,
+        "received_at": whatsapp_symptom_at,
+        "channel": "whatsapp" if (whatsapp_fb or whatsapp_msg) else "intake",
+        "has_whatsapp_source": bool(whatsapp_fb or whatsapp_msg),
+    } if whatsapp_symptom_text else None
+
+    now_dt = current_utc_naive()
+    further_appointments = []
+    for a in appointments:
+        st = str(a.get("status") or "").lower()
+        dt = a.get("appointment_date")
+        if st in ("scheduled", "checked_in", "confirmed", "booked", "pending") or (dt and dt >= now_dt):
+            further_appointments.append(a)
+    further_appointments.sort(key=lambda x: str(x.get("appointment_date") or ""), reverse=False)
+
     return {
         "patient": patient,
         "clinical_history": history,
@@ -254,6 +313,8 @@ def get_profile(hospital_id, patient_id):
         "admissions": admissions,
         "encounters": encounters,
         "appointments": appointments,
+        "further_appointments": further_appointments,
+        "whatsapp_symptoms": whatsapp_symptoms,
         "journeys": journeys,
         "checkpoints": checkpoints,
         "tasks": tasks,
@@ -1356,3 +1417,157 @@ def patient_audit(hospital_id, patient_id, limit=100):
         return _all(cur, "SELECT id, actor_username, action, module_name, entity_key, payload, created_at FROM audit_logs "
                          "WHERE hospital_id = ? AND module_name = 'patient360' AND entity_key = ? ORDER BY created_at DESC, id DESC LIMIT ?",
                     (hospital_id, patient_id, max(1, min(int(limit), 500))))
+
+
+# ── Coordinator notes & symptom history ─────────────────────────────────────────────────────────
+NOTE_MAX = 2000
+
+
+def list_notes(hospital_id, patient_id, limit=100):
+    with get_connection() as conn:
+        cur = conn.cursor()
+        _canonical_patient(cur, hospital_id, patient_id)
+        return _all(cur, "SELECT id, note, author, created_at FROM care_notes WHERE hospital_id = ? AND patient_id = ? "
+                         "ORDER BY created_at DESC, id DESC LIMIT ?", (hospital_id, patient_id, max(1, min(int(limit), 500))))
+
+
+def add_note(hospital_id, actor, patient_id, text):
+    note = str(text or "").strip()  # newlines are kept; only the ends are trimmed
+    if not note:
+        raise Patient360Error("note is required")
+    if len(note) > NOTE_MAX:
+        raise Patient360Error(f"note must be at most {NOTE_MAX} characters")
+    with get_connection() as conn:
+        cur = conn.cursor()
+        _canonical_patient(cur, hospital_id, patient_id)
+        cur.execute("INSERT INTO care_notes (hospital_id, patient_id, note, author) VALUES (?, ?, ?, ?) "
+                    "RETURNING id, note, author, created_at", (hospital_id, patient_id, note, actor))
+        row = row_to_dict(cur.fetchone())
+        conn.commit()
+    return row
+
+
+def symptom_history(hospital_id, patient_id, limit=50):
+    """Every symptom report the patient sent in, newest first (hospital messages and registration echoes excluded)."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        _canonical_patient(cur, hospital_id, patient_id)
+        rows = _all(cur, "SELECT id, channel, body, created_at FROM patient_messages WHERE hospital_id = ? AND patient_id = ? "
+                         "AND kind = 'symptoms' AND body IS NOT NULL AND body <> '' ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (hospital_id, patient_id, max(1, min(int(limit), 200))))
+    out = []
+    for r in rows:
+        text = rules.clean_symptom_text(r["body"])
+        if text:
+            out.append({"id": r["id"], "channel": r["channel"], "symptoms": text, "created_at": r["created_at"]})
+    return out
+
+
+# ── Full cross-module record (print summary) ────────────────────────────────────────────────────
+# (table, module, title, curated). `curated` tables are already laid out by the profile, so they only feed the module trail;
+# the rest are printed generically. Table names come from this constant list only -- never from request input.
+_RECORD_TABLES = [
+    ("patients", "Registration", "Registration", True),
+    ("appointments", "Appointments", "Appointments", True),
+    ("opd_queue", "OPD", "OPD queue", False),
+    ("op_timeline", "OPD", "OP timeline", False),
+    ("encounters", "OPD / Inpatient", "Encounters", True),
+    ("er_visits", "Emergency", "Emergency visits", True),
+    ("admissions", "Inpatient", "Admissions", True),
+    ("bed_allocations", "Bed management", "Bed allocations", True),
+    ("patient_movements", "Bed management", "Patient movements", False),
+    ("clinical_notes", "Clinical", "Clinical notes", False),
+    ("diagnosis_records", "Clinical", "Diagnoses", True),
+    ("medical_history", "Clinical", "Medical history", True),
+    ("care_plans", "Clinical", "Care plans", False),
+    ("clinical_orders", "Clinical", "Clinical orders", False),
+    ("certificates", "Clinical", "Certificates", False),
+    ("patient_vitals", "Nursing", "Vitals", True),
+    ("nursing_notes", "Nursing", "Nursing notes", False),
+    ("observation_notes", "Nursing", "Observation notes", False),
+    ("medication_schedules", "Nursing", "Medication administration schedule", False),
+    ("icu_consults", "ICU", "ICU consults", False),
+    ("icu_flowsheets", "ICU", "ICU flowsheets", False),
+    ("icu_monitoring", "ICU", "ICU monitoring", False),
+    ("icu_ventilator_settings", "ICU", "ICU ventilator settings", False),
+    ("icu_infusions", "ICU", "ICU infusions", False),
+    ("icu_io_records", "ICU", "ICU intake / output", False),
+    ("icu_lab_results", "ICU", "ICU lab results", False),
+    ("icu_rass_scores", "ICU", "ICU sedation (RASS) scores", False),
+    ("diagnostics", "Laboratory / Radiology", "Diagnostic orders", True),
+    ("ot_cases", "Surgery / OT", "OT cases", False),
+    ("ot_surgeries", "Surgery / OT", "Surgeries", True),
+    ("pharmacy_prescriptions", "Pharmacy", "Prescriptions", True),
+    ("pharmacy_sales", "Pharmacy", "Pharmacy sales", False),
+    ("invoices", "Billing", "Invoices", True),
+    ("insurance_claims", "Insurance", "Insurance claims", True),
+    ("insurance_verifications", "Insurance", "Insurance verifications", False),
+    ("insurance_records", "Insurance", "Insurance records", False),
+    ("ambulance_dispatch", "Ambulance", "Ambulance dispatch", False),
+    ("transfer_notices", "Transfers", "Transfer notices", False),
+    ("patient_consents", "Consent", "Consents", False),
+    ("documents", "Documents", "Documents", True),
+    ("patient_messages", "Patient messages", "Messages", True),
+    ("care_journey_instances", "Patient 360", "Care journeys", True),
+    ("care_tasks", "Patient 360", "Tasks", True),
+    ("care_notes", "Patient 360", "Coordinator notes", True),
+    ("survey_responses", "Patient 360", "Survey responses", True),
+]
+_SKIP_EXACT = {"id", "hospital_id", "patient_id", "deleted_at", "password", "token", "secret", "hash", "embedding", "ocr_text", "file_data", "file_content", "blob"}
+_SKIP_SUFFIX = ("_token", "_hash", "_secret", "_password", "_embedding", "_blob", "_ocr_text")
+
+
+def _skip_col(name):
+    return name in _SKIP_EXACT or name.endswith(_SKIP_SUFFIX)
+
+
+_WHEN_COLS = ("created_at", "recorded_at", "arrival_at", "admission_date", "appointment_date", "scheduled_start", "allocated_at", "timestamp",
+              "event_time", "started_at", "submitted_at", "noted_at", "ordered_at", "moved_at", "dispatched_at")
+_CELL_MAX = 1500
+
+
+def _record_cell(v):
+    if v is None or isinstance(v, (bytes, bytearray, memoryview)):
+        return None
+    if isinstance(v, str) and len(v) > _CELL_MAX:
+        return v[:_CELL_MAX] + "…"
+    return v
+
+
+def full_record(hospital_id, patient_id, per_table=200):
+    """Every module's rows for one patient plus the trail of modules the patient has been through (oldest first)."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        pid = _canonical_patient(cur, hospital_id, patient_id)["patient_id"]
+    modules, sections = {}, []
+    for table, module, title, curated in _RECORD_TABLES:
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                if not _has_col(cur, table, "patient_id"):
+                    continue
+                where, params = ["patient_id = ?"], [pid]
+                if _has_col(cur, table, "hospital_id"):
+                    where.append("hospital_id = ?"); params.append(hospital_id)
+                if _has_col(cur, table, "deleted_at"):
+                    where.append("deleted_at IS NULL")
+                when = next((c for c in _WHEN_COLS if _has_col(cur, table, c)), None)
+                order = f"ORDER BY {when} DESC" if when else ""
+                rows = _all(cur, f"SELECT * FROM {table} WHERE {' AND '.join(where)} {order} LIMIT {int(per_table)}", tuple(params))
+        except Exception:  # one unreadable source must not blank the whole record
+            logger.exception("patient360: full record source %s failed for %s", table, pid)
+            continue
+        if not rows:
+            continue
+        stamps = [str(r[when]) for r in rows if when and r.get(when)]
+        m = modules.setdefault(module, {"module": module, "records": 0, "first": None, "last": None, "sources": []})
+        m["records"] += len(rows)
+        m["sources"].append(title)
+        if stamps:
+            m["first"] = min([x for x in (m["first"], min(stamps)) if x])
+            m["last"] = max([x for x in (m["last"], max(stamps)) if x])
+        if not curated:
+            cleaned = [{k: _record_cell(v) for k, v in r.items() if not _skip_col(k)} for r in rows]
+            sections.append({"module": module, "title": title, "rows": cleaned})
+    trail = sorted(modules.values(), key=lambda x: (x["first"] is None, x["first"] or ""))
+    return {"modules": trail, "sections": sections}

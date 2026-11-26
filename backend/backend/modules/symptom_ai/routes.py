@@ -829,3 +829,39 @@ def symptom_ai_chat_history_clear():
         current_hospital_id(), g.current_user.get("username")
     )
     return jsonify({"status": "ok"})
+
+
+@symptom_ai_bp.post("/api/ai/suggest-medications")
+def suggest_medications_endpoint():
+    """
+    Clinical Decision Support Endpoint:
+    Suggests medications based on:
+    - Older/baseline vitals & older reports
+    - Current vitals & symptoms
+    Provides distinct clarity between Generic (Salt/Molecule) names,
+    registered CDCI brands, and hospital pharmacy stock.
+    """
+    from ai.medicine_consultation_engine import MedicineKnowledgeDatabase, ClinicalMedicineConsultationEngine
+
+    data = request.get_json(silent=True) or {}
+    past_vitals = data.get("past_vitals", [])
+    past_reports = data.get("past_reports", [])
+    past_diagnoses = data.get("past_diagnoses", [])
+    allergies = data.get("allergies", [])
+    current_vitals = data.get("current_vitals", {})
+    current_symptoms = data.get("current_symptoms", "")
+
+    db = MedicineKnowledgeDatabase()
+    engine = ClinicalMedicineConsultationEngine(db)
+
+    result = engine.evaluate_consultation(
+        past_vitals=past_vitals,
+        past_reports=past_reports,
+        past_diagnoses=past_diagnoses,
+        allergies=allergies,
+        current_vitals=current_vitals,
+        current_symptoms=current_symptoms
+    )
+
+    return jsonify(result)
+

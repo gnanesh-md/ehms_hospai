@@ -127,6 +127,38 @@ def patient_audit(patient_id):
     return jsonify({"events": service.patient_audit(_hid(), patient_id, request.args.get("limit", default=100, type=int))})
 
 
+@patient360_bp.get("/api/patient360/patients/<patient_id>/notes")
+@require_permissions(READ)
+@_errors
+def notes_list(patient_id):
+    return jsonify({"notes": service.list_notes(_hid(), patient_id)})
+
+
+@patient360_bp.post("/api/patient360/patients/<patient_id>/notes")
+@require_permissions(COORD)
+@_errors
+def notes_add(patient_id):
+    n = service.add_note(_hid(), _actor(), patient_id, _body().get("note"))
+    _audit("note_added", patient_id, {"note_id": n["id"]})  # the note text itself is not copied into the audit log
+    return jsonify(n), 201
+
+
+@patient360_bp.get("/api/patient360/patients/<patient_id>/full-record")
+@require_permissions(READ)
+@_errors
+def full_record(patient_id):
+    data = service.full_record(_hid(), patient_id)
+    _audit("full_record_print", patient_id, {"modules": len(data["modules"])})  # a cross-module read of the whole record is audited
+    return jsonify(data)
+
+
+@patient360_bp.get("/api/patient360/patients/<patient_id>/symptoms")
+@require_permissions(READ)
+@_errors
+def symptoms_history(patient_id):
+    return jsonify({"symptoms": service.symptom_history(_hid(), patient_id)})
+
+
 # ── Consent, preferences, eligibility ───────────────────────────────────────────────────────────
 @patient360_bp.get("/api/patient360/patients/<patient_id>/consent")
 @require_permissions(READ)

@@ -24,6 +24,15 @@ export const fmtDuration = (seconds?: number | null) => {
 }
 export const fullName = (r: { name?: string; last_name?: string; patient_name?: string; patient_last_name?: string }) =>
   [r.name ?? r.patient_name, r.last_name ?? r.patient_last_name].filter(Boolean).join(" ") || "—"
+/** Patient-reported symptoms only: drops the hospital's own registration message and strips helpline / link boilerplate. */
+export const cleanSymptoms = (t?: string | null): string => {
+  if (!t) return ""
+  if (/you are registered at|\bUMR\b[\s\S]{0,60}\bOP No\b|OP timings\s*:/i.test(t)) return ""
+  return t.replace(/\bHelpline\b[^.\n]*\.?|Your health record\s*:?\s*\S*|https?:\/\/\S+/gi, "").replace(/\s{2,}/g, " ").replace(/^[\s.,-]+|[\s.,-]+$/g, "")
+}
+/** First non-empty cleaned symptom text from the given candidates. */
+export const firstSymptoms = (...c: Array<string | null | undefined>): string => { for (const x of c) { const s = cleanSymptoms(x); if (s) return s } return "" }
+
 export const pretty = (s?: string | null) => (s ? s.replace(/_/g, " ") : "—")
 
 type Tone = "gray" | "blue" | "green" | "amber" | "red" | "purple"
